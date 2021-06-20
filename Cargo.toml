@@ -1,0 +1,10 @@
+[package]
+name = "rusbtmc"
+version = "0.0.1"
+authors = ["Nao Pross <np@0hm.ch>"]
+edition = "2018"
+
+[dependencies]
+serialport = "4.0.0"
+rusb = "0.8.0"
+thiserror = "1.0"
