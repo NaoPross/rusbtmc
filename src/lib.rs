@@ -99,6 +99,10 @@ pub enum Error {
     Request,
     #[error("device does not support the request type")]
     NotSupported,
+    #[error("decoding error (utf-8)")]
+    Decoding(#[from] std::string::FromUtf8Error),
+    #[error("not implemented")]
+    NotImplemented,
 }
 
 /// Get a list of connected instruments
@@ -122,16 +126,22 @@ pub fn instruments() -> Result<Vec<Instrument<rusb::GlobalContext>>, Error> {
 /// 'High level' Instrument wrapper around rusb::Device
 pub struct Instrument<C: rusb::UsbContext> {
     connected: bool,
+    // rusb objects
     pub device: rusb::Device<C>,
     pub handle: Option<rusb::DeviceHandle<C>>,
+    // usbtmc capabilites
     capabilities: Option<Capabilities>,
+    // for linux kernel
     has_kernel_driver: bool,
+    // addresses in the usb device
     config_num: Option<u8>,
     iface_num: Option<u8>,
     ep_bulk_in: Option<u8>,
     ep_bulk_out: Option<u8>,
     ep_interrupt_in: Option<u8>,
+    // btag number to keep track of packet parts
     btag: Wrapping<u8>,
+    // default timeout
     timeout: Duration,
 }
 
@@ -180,6 +190,10 @@ impl<C: rusb::UsbContext> Instrument<C> {
         })
     }
 
+    pub fn is_connected(&self) -> bool {
+        return self.connected;
+    }
+
     /// Opens (searches for) the USBTMC interface of the device
     ///
     /// It loops through the available usb interfaces and uses the first that
@@ -216,6 +230,7 @@ impl<C: rusb::UsbContext> Instrument<C> {
                     // check if it is has USB488
                     if iface_desc.protocol_code() == USB488_BINTERFACE_PROTOCOL {
                         // TODO
+                        return Err(Error::NotImplemented);
                     }
 
                     self.config_num = Some(cfg_desc.number());
@@ -458,6 +473,7 @@ impl<C: rusb::UsbContext> Instrument<C> {
         Ok(capabilities)
     }
 
+    ///
     pub fn pulse(&mut self) -> Result<(), Error> {
         if !self.connected {
             return Err(Error::NotConnected);
@@ -499,6 +515,11 @@ impl<C: rusb::UsbContext> Instrument<C> {
         Ok(())
     }
 
+    /// Write a string to the instrument
+    pub fn write(&mut self, message: &str) -> Result<usize, Error> {
+        return self.write_raw(message.as_bytes());
+    }
+
     /// Write binary data to the instrument
     pub fn write_raw(&mut self, data: &[u8]) -> Result<usize, Error> {
         if !self.connected {
@@ -531,16 +552,14 @@ impl<C: rusb::UsbContext> Instrument<C> {
             );
 
             let mut packet: [u8; PACKET_SIZE] = [0; PACKET_SIZE];
-            packet[..12].clone_from_slice(&header);
-            packet[13..].clone_from_slice(chunk);
+            packet[..HEADER_SIZE].clone_from_slice(&header);
+            packet[(HEADER_SIZE +1)..].clone_from_slice(chunk);
 
             sent_bytes += match handle.write_bulk(endpoint, &packet, self.timeout) {
                 Ok(sent) => sent,
                 Err(e) => {
                     dbg!("failed to send chunk during bulk out");
-                    if let Err(e) = self.abort_bulk_out() {
-                        return Err(e);
-                    }
+                    self.abort_bulk_out()?;
                     return Err(Error::Rusb(e));
                 }
             };
@@ -554,8 +573,8 @@ impl<C: rusb::UsbContext> Instrument<C> {
         }
 
         // send remainder
-        let padding = (4 - (last_data.len() % 4)) % 4;
-        let last_data_size: usize = last_data.len() + padding;
+        let pad_size = (4 - (last_data.len() % 4)) % 4;
+        let last_data_size: usize = last_data.len() + pad_size;
 
         let header = make_bulk_header(
             MsgId::DeviceDependent,
@@ -565,11 +584,29 @@ impl<C: rusb::UsbContext> Instrument<C> {
             true,
         );
 
-        // TODO: pad and send last byte
+        let mut packet: [u8; PACKET_SIZE] = [0; PACKET_SIZE];
+        packet[..HEADER_SIZE].clone_from_slice(&header);
+        for i in 0..last_data.len() {
+            packet[HEADER_SIZE + 1 + i] = last_data[i];
+        }
+
+        sent_bytes += match handle.write_bulk(
+            endpoint,
+            &packet[..(HEADER_SIZE + last_data_size)],
+            self.timeout
+        ) {
+            Ok(sent) => sent,
+            Err(e) => {
+                dbg!("failed to send chunk during bulk out");
+                self.abort_bulk_out()?;
+                return Err(Error::Rusb(e));
+            }
+        };
 
         Ok(sent_bytes)
     }
 
+    /// Abort a bulk-out operation
     fn abort_bulk_out(&mut self) -> Result<(), Error> {
         if !self.connected {
             return Err(Error::NotConnected);
@@ -596,6 +633,20 @@ impl<C: rusb::UsbContext> Instrument<C> {
         }
 
         Ok(())
+    }
+
+    /// Read binary data from the device and decode into an utf-8 string
+    pub fn read(&mut self) -> Result<String, Error> {
+        let data = self.read_raw()?;
+        return match String::from_utf8(data) {
+            Ok(s) => Ok(s),
+            Err(e) => Err(Error::Decoding(e)),
+        };
+    }
+
+    /// Read binary data from the device
+    pub fn read_raw(&mut self) -> Result<Vec<u8>, Error> {
+        return Err(Error::NotImplemented);
     }
 }
 
@@ -645,3 +696,18 @@ fn make_bulk_header(
 
     header
 }
+
+impl<C: rusb::UsbContext> std::fmt::Debug for Instrument<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // TODO: complete
+        f.debug_struct("Instrument")
+            .field("connected", &self.connected)
+            .field("capabilities", &self.capabilities)
+            .field("has_kernel_driver", &self.has_kernel_driver)
+            .field("config_num", &self.config_num)
+            .field("iface_num", &self.iface_num)
+            .finish()
+
+    }
+}
+
