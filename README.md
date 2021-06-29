@@ -1,6 +1,8 @@
 Rust USBTMC Driver
 ==================
 
+![](doc/logo/rusbtmc.png)
+
 This is a *still work in progress* driver for devices following the USB Test
 and Measurement Class specification, i.e. Oscilloscopes, Voltmeters, PSUs,
 Signal Generators, etc.
